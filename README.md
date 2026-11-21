@@ -25,33 +25,37 @@ real runs).
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TB
     cli["pgdrill CLI on the host"]
-    verify["verify: RPO, RTO, in-doubt, split brain"]
-    report["report.json + report.md"]
 
     subgraph client["client network"]
-        runner["runner: N writers, one row per commit"]
-        haproxy["HAProxy :5000, checks Patroni /primary"]
+        direction LR
+        runner["runner: N writers,<br/>one row per commit"]
+        haproxy["HAProxy :5000<br/>checks Patroni /primary"]
     end
 
-    subgraph pg["3 x Patroni + PostgreSQL 17, on both networks"]
+    subgraph pg["Patroni + PostgreSQL 17, on both networks"]
+        direction LR
         pg1["pg1"]
         pg2["pg2"]
         pg3["pg3"]
     end
 
-    subgraph cluster["cluster network: replication and DCS"]
+    subgraph cluster["cluster network: replication + DCS"]
         etcd[("etcd")]
     end
 
-    runner -- "via haproxy" --> haproxy --> pg
-    runner -. "via libpq multi-host" .-> pg
-    pg -- "leader key" --> etcd
-    cli -- "podman: kill, stop, pause, disconnect, switchover" --> pg
+    verify["verify: RPO, RTO,<br/>in-doubt, split brain"]
+    report["report.json + report.md"]
+
+    cli -- "start / stop writers" --> runner
+    cli -- "faults: kill, stop, pause,<br/>disconnect, switchover" --> pg
     cli -- "kill" --> etcd
+    runner -- "via haproxy" --> haproxy --> pg
+    runner -. "via libpq" .-> pg
+    pg -- "leader key" --> etcd
     runner -- "acks and errors" --> verify
-    pg -- "ledger of the surviving primary" --> verify
+    pg -- "ledger" --> verify
     verify --> report
 ```
 
