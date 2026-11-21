@@ -25,6 +25,9 @@ jobs:
     needs: unit
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      SCENARIOS: ${{ inputs.scenarios || 'kill-primary,switchover,lagging-replicas-failover' }}
+      MODES: ${{ inputs.modes || 'async,sync' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -33,12 +36,11 @@ jobs:
       - name: build lab image
         run: uv run pgdrill lab build
       - name: run drill
-        # thresholds are informative here: async is expected to lose writes in some scenarios
-        run: |
-          uv run pgdrill run \
-            --scenarios "${{ inputs.scenarios || 'kill-primary,switchover,lagging-replicas-failover' }}" \
-            --modes "${{ inputs.modes || 'async,sync' }}" \
-            --out drill-report || echo "drill exit code $?"
+        # Fails the job on the safety checks only: a crashed run, split brain, writes that
+        # never resume, a cluster that does not heal, hung writers, unexplained rows, or any
+        # acknowledged write lost in sync mode. No --max-rto/--max-rpo: timings on shared
+        # runners vary too much, and async loss (or a refused failover) is expected behaviour.
+        run: uv run pgdrill run --scenarios "$SCENARIOS" --modes "$MODES" --out drill-report
       - name: job summary
         if: always()
         run: test -f drill-report/report.md && cat drill-report/report.md >> "$GITHUB_STEP_SUMMARY" || true

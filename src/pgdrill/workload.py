@@ -1,21 +1,28 @@
-"""Write workload. Runs INSIDE the lab network (python -m pgdrill.workload).
+"""Write workload. Runs INSIDE the lab's client network (python -m pgdrill.workload).
 
 Every writer inserts (run_id, writer_id, seq) rows in autocommit mode and logs one JSON
 line per event to --out:
 
-  {"ev": "connect", "t": ..., "w": 1, "srv": "10.89.77.11", "rec": false}
-  {"ev": "ack",     "t": ..., "w": 1, "seq": 42, "srv": "10.89.77.11"}
-  {"ev": "err",     "t": ..., "w": 1, "seq": 43, "phase": "commit", "msg": "..."}
+  {"ev": "connect",  "t": ..., "w": 1, "srv": "10.89.78.11", "rec": false}
+  {"ev": "ack",      "t": ..., "w": 1, "seq": 42, "srv": "10.89.78.11"}
+  {"ev": "err",      "t": ..., "w": 1, "seq": 43, "phase": "commit", "sqlstate": null, "msg": "..."}
+  {"ev": "stopping", "t": ...}                      # stop requested: end of the measured window
+  {"ev": "inflight", "t": ..., "w": 2, "seq": 77}   # writer still blocked in COMMIT at stop
+  {"ev": "stop",     "t": ..., "hung_writers": 1}
 
 An "ack" means the server confirmed the commit. A commit-phase "err" carries the SQLSTATE
 when the server answered; verify.py decides whether it was a clean rejection (e.g. 25006
-read-only) or in doubt (connection lost, backend terminated: may or may not have committed). The drill compares acks with the ledger
-table on the surviving primary afterwards.
+read-only) or in doubt (connection lost, backend terminated: may or may not have committed).
+"inflight" commits never got an answer and are in doubt too.
+
+The connection string comes from the host (runner.py) and already carries the client
+timeouts, so the report can state exactly what the clients were configured with.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import threading
@@ -23,15 +30,12 @@ import time
 
 import psycopg
 
-TIMEOUTS = (
-    " connect_timeout=2 tcp_user_timeout=3000 keepalives=1"
-    " keepalives_idle=1 keepalives_interval=1 keepalives_count=2"
-)
+RETRY_AFTER_ERROR_S = 0.05
 
 
 class EventLog:
     def __init__(self, path: str):
-        self._f = open(path, "w", buffering=1 << 16)
+        self._f = open(path, "w", buffering=1 << 16)  # noqa: SIM115 - closed in close()
         self._lock = threading.Lock()
         self._last_flush = time.monotonic()
 
@@ -51,6 +55,10 @@ class EventLog:
             self._f.close()
 
 
+# writer id -> seq of the COMMIT currently in flight (absent when idle)
+INFLIGHT: dict[int, int] = {}
+
+
 def writer(wid: int, conninfo: str, run_id: str, interval: float, stop: threading.Event, log: EventLog) -> None:
     seq = 0
     conn = None
@@ -58,7 +66,7 @@ def writer(wid: int, conninfo: str, run_id: str, interval: float, stop: threadin
     while not stop.is_set():
         if conn is None:
             try:
-                conn = psycopg.connect(conninfo + TIMEOUTS + f" application_name=pgdrill-w{wid}", autocommit=True)
+                conn = psycopg.connect(conninfo + f" application_name=pgdrill-w{wid}", autocommit=True)
                 srv, rec = conn.execute("select host(inet_server_addr()), pg_is_in_recovery()").fetchone()
                 log.emit(ev="connect", t=time.time(), w=wid, srv=srv, rec=rec)
             except Exception as exc:  # noqa: BLE001 - any failure means "retry"
@@ -67,6 +75,7 @@ def writer(wid: int, conninfo: str, run_id: str, interval: float, stop: threadin
                 stop.wait(0.2)
                 continue
         seq += 1
+        INFLIGHT[wid] = seq
         try:
             conn.execute(
                 "insert into ledger (run_id, writer_id, seq, client_ts) values (%s, %s, %s, %s)",
@@ -77,12 +86,13 @@ def writer(wid: int, conninfo: str, run_id: str, interval: float, stop: threadin
             log.emit(ev="err", t=time.time(), w=wid, seq=seq, phase="commit", srv=srv,
                      sqlstate=getattr(exc, "sqlstate", None),
                      msg=str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__)
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:  # noqa: BLE001
-                pass
             conn = None
+            stop.wait(RETRY_AFTER_ERROR_S)
             continue
+        finally:
+            INFLIGHT.pop(wid, None)
         if interval:
             stop.wait(interval)
     if conn is not None:
@@ -98,25 +108,33 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--stop-file", required=True)
     ap.add_argument("--max-duration", type=float, default=600)
+    ap.add_argument("--join-timeout", type=float, default=10, help="total wait for writers at stop (s)")
     args = ap.parse_args(argv)
 
     log = EventLog(args.out)
     stop = threading.Event()
     log.emit(ev="start", t=time.time(), writers=args.writers)
-    threads = [
-        threading.Thread(target=writer, args=(i, args.conninfo, args.run_id, args.interval, stop, log), daemon=True)
-        for i in range(1, args.writers + 1)
-    ]
-    for th in threads:
+    threads = {
+        wid: threading.Thread(target=writer, args=(wid, args.conninfo, args.run_id, args.interval, stop, log),
+                              daemon=True)
+        for wid in range(1, args.writers + 1)
+    }
+    for th in threads.values():
         th.start()
     t0 = time.monotonic()
     while not os.path.exists(args.stop_file) and time.monotonic() - t0 < args.max_duration:
         time.sleep(0.2)
+    log.emit(ev="stopping", t=time.time())
     stop.set()
-    # Writers blocked on a hung COMMIT are daemons: give them a moment, then exit anyway.
-    for th in threads:
-        th.join(timeout=10)
-    log.emit(ev="stop", t=time.time(), hung_writers=sum(th.is_alive() for th in threads))
+    # One shared deadline: writers blocked on a hung COMMIT are daemons and get abandoned.
+    deadline = time.monotonic() + args.join_timeout
+    for th in threads.values():
+        th.join(timeout=max(0.0, deadline - time.monotonic()))
+    hung = [wid for wid, th in threads.items() if th.is_alive()]
+    for wid in hung:
+        if wid in INFLIGHT:
+            log.emit(ev="inflight", t=time.time(), w=wid, seq=INFLIGHT[wid])
+    log.emit(ev="stop", t=time.time(), hung_writers=len(hung))
     log.close()
     os._exit(0)
 

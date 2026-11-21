@@ -12,18 +12,18 @@ late, usually during the first failover rehearsal.
 |---|---|---|
 | RAC (shared disk, all instances read-write) | No equivalent. Shared-nothing: one primary, N streaming replicas | Write scale-out across nodes is gone. Apps that spread writes over RAC instances need a single write endpoint. Multi-master exists only as commercial products (EDB PGD) or sharding (Citus), each with its own trade-offs. |
 | Data Guard physical standby | Streaming replication (physical WAL shipping) | Close match. |
-| Active Data Guard (read-only standby) | Hot standby | Close match. Replica reads may be stale under async. |
+| Active Data Guard (read-only standby) | Hot standby | Close match. Replica reads can be stale in any replication mode unless `synchronous_commit = remote_apply`. |
 | Protection mode **Maximum Performance** | Asynchronous replication | Acknowledged commits can be lost on failover. |
 | Protection mode **Maximum Availability** | Patroni `synchronous_mode: true` | Both wait for a sync standby and fall back to async when none is healthy. Patroni only promotes a standby that was synchronous. |
 | Protection mode **Maximum Protection** | Patroni `synchronous_mode_strict: true` | Different failure behaviour: Oracle **shuts the primary down**, Postgres **blocks commits** (the primary stays up, sessions hang on COMMIT). |
-| Data Guard Broker + Fast-Start Failover + Observer | Patroni + a DCS (etcd/Consul/ZooKeeper) quorum | The DCS plays the observer's role as the arbiter. `ttl` ≈ `FastStartFailoverThreshold`, `maximum_lag_on_failover` ≈ `FastStartFailoverLagLimit`. |
+| Data Guard Broker + Fast-Start Failover + Observer | Patroni + a DCS (etcd/Consul/ZooKeeper) quorum | The DCS plays the observer's role as the arbiter. `ttl` ≈ `FastStartFailoverThreshold`. `maximum_lag_on_failover` plays the role of `FastStartFailoverLagLimit`, but it is measured in bytes of WAL, not seconds. |
 | Broker switchover | `patronictl switchover` | Planned, no data loss in any mode. |
 | Reinstate the old primary (Flashback Database) | `pg_rewind` (Patroni `use_pg_rewind`) or re-clone | Needs `wal_log_hints` or data checksums. |
 | Observer loss | DCS loss | By default Patroni **demotes the primary** when it loses the DCS. `failsafe_mode: true` (Patroni ≥ 3.0) keeps it up as long as it can reach every member. |
 | Services (`srvctl add service`), role-based services | HAProxy listeners health-checking Patroni REST (`/primary`, `/replica`), Patroni tags (`noloadbalance`) | No first-class "service" object. Routing is built from parts. |
 | SCAN listener / VIP | HAProxy (+ keepalived or vip-manager), DNS, or a client host list | |
 | Connect-time failover (`FAILOVER=ON`, `ADDRESS_LIST`) | libpq multi-host: `host=a,b,c target_session_attrs=read-write` | Supported by libpq-based drivers and pgJDBC (`targetServerType=primary`). |
-| TAF / Application Continuity (transaction replay) | **None** | In-flight transactions fail. Their outcome is unknown to the client (committed or not). The application must retry and be idempotent. |
+| TAF (reconnects, resumes SELECTs) / Application Continuity (replays in-flight transactions) | **None** | libpq multi-host covers reconnecting, nothing covers replay. In-flight transactions fail and their outcome is unknown to the client (committed or not). The application must retry and be idempotent. |
 | FAN (fast application notification) | None native. HAProxy `on-marked-down shutdown-sessions`, Patroni callbacks | Clients find out by having their connection reset. |
 | Snapshot standby | None built-in | Clone from backup (pgBackRest, Barman) instead. |
 | Far Sync | Cascading replication (partial) | No zero-loss far-sync equivalent. |
@@ -49,11 +49,16 @@ late, usually during the first failover rehearsal.
    `retry_timeout`, the proxy health-check interval and the driver's TCP
    timeouts. The defaults add up to 30+ seconds. Nobody knows the real number
    until they measure it under load.
+6. **An isolated asynchronous primary keeps taking writes.** Cut off from the
+   DCS and its standbys but still reachable by clients, the primary acknowledges
+   commits until Patroni demotes it (about `retry_timeout` later). After
+   failover those writes are gone. In synchronous mode the same commits block
+   instead, because no standby can confirm them.
 
 ## 3. The gap
 
 Setting up Patroni is well documented, and so are HAProxy configs and
-the libpq options. What I could not find in the open-source ecosystem is a tool
+the libpq options. What we could not find in the open-source ecosystem is a tool
 that answers the question an Oracle team actually asks before signing off a
 migration:
 
@@ -69,11 +74,12 @@ reproduce. Teams end up running ad-hoc `kill -9` tests and eyeballing logs.
 It runs a repeatable, headless failover drill and turns it into numbers:
 
 - builds a 3-node Patroni + etcd + HAProxy lab on Podman (no Oracle needed,
-  synthetic data only)
+  synthetic data only), with separate client and cluster networks so a node can
+  be cut off from the cluster while clients still reach it
 - runs a write workload in which every commit is identified, so the client side
   knows exactly which writes the server acknowledged
 - injects one fault per run: primary crash, clean shutdown, switchover, network
-  partition, DCS loss, failover with lagging replicas, loss of all replicas
+  partition, DCS loss, failover with stalled standbys, loss of all replicas
 - after recovery it compares acknowledged writes with what the new primary holds:
   - **RPO**: acknowledged writes that were lost
   - **RTO**: the longest write outage seen by clients
@@ -82,11 +88,13 @@ It runs a repeatable, headless failover drill and turns it into numbers:
 - repeats the matrix for the three replication modes, labelled with their
   Data Guard names, through HAProxy or libpq multi-host routing
 - writes JSON (for CI and agents) and Markdown (for people), and exits non-zero
-  when a run breaks the RTO/RPO thresholds you set
+  on a safety failure (split brain, no recovery, acknowledged writes lost in
+  synchronous mode) or when a run breaks the RTO/RPO thresholds you set
 
-The same drill can then be pointed at the target configuration a migration team
-is about to deploy (timeouts, sync mode, proxy settings) to get numbers before
-the cutover instead of after.
+The Patroni timers, the replication mode and `failsafe_mode` are flags, so a team
+can set them to the values it plans for production and get numbers before the
+cutover instead of after. Pointing the drill at an existing staging cluster,
+instead of the built-in lab, is on the roadmap.
 
 ## References
 

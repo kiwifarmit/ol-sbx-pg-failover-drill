@@ -8,6 +8,7 @@ import platform
 import sys
 import time
 import traceback
+from dataclasses import asdict
 from pathlib import Path
 
 from .lab import MODES, Lab, Timers
@@ -23,8 +24,13 @@ def _csv(value: str, choices: list[str]) -> list[str]:
 
 
 def _timers(args) -> Timers:
-    return Timers(ttl=args.ttl, loop_wait=args.loop_wait, retry_timeout=args.retry_timeout,
-                  failsafe=not args.no_failsafe)
+    timers = Timers(ttl=args.ttl, loop_wait=args.loop_wait, retry_timeout=args.retry_timeout,
+                    failsafe=not args.no_failsafe)
+    try:
+        timers.validate()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return timers
 
 
 def _add_timer_args(p: argparse.ArgumentParser) -> None:
@@ -78,6 +84,7 @@ def _finish(results: list[dict], meta: dict, batch: Path, max_rto, max_rpo, quie
 
 
 def cmd_run(args) -> int:
+    from . import runner
     from .drill import log, run_one
     from .faults import SCENARIOS
 
@@ -92,23 +99,34 @@ def cmd_run(args) -> int:
         "generated": time.strftime("%Y-%m-%d %H:%M:%S %z"),
         "host": f"{platform.system()} {platform.machine()}",
         "podman": podman_out("version", "--format", "{{.Client.Version}}", check=False),
-        "timers": timers.__dict__,
+        "timers": asdict(timers),
         "writers": args.writers,
+        "writer_interval_s": runner.WRITER_INTERVAL_S,
+        "client_options": runner.CLIENT_OPTS,
         "scenarios": scenarios, "modes": modes, "via": vias,
     }
     results = []
-    for mode in modes:
-        for via in vias:
-            for sc in scenarios:
-                try:
-                    results.append(run_one(lab, sc, MODES[mode], via, batch, timers=timers, writers=args.writers))
-                except Exception as exc:  # noqa: BLE001 - record and move on, recreate the lab
-                    log(f"run {sc}.{mode}.{via} failed: {exc}")
-                    traceback.print_exc()
-                    results.append({"scenario": sc, "mode": mode, "via": via, "error": str(exc)})
-                    lab.down()
-                # keep the report current while a long matrix runs
-                _finish(results, meta, batch, args.max_rto, args.max_rpo, quiet=True)
+    try:
+        for mode in modes:
+            for via in vias:
+                for sc in scenarios:
+                    try:
+                        results.append(run_one(lab, sc, MODES[mode], via, batch, timers=timers,
+                                               writers=args.writers))
+                    except Exception as exc:  # noqa: BLE001 - record and move on, recreate the lab
+                        log(f"run {sc}.{mode}.{via} failed: {exc}")
+                        traceback.print_exc()
+                        results.append({"scenario": sc, "mode": mode, "via": via, "error": str(exc)})
+                        runner.remove_workload()
+                        lab.down()
+                    # keep the report current while a long matrix runs
+                    _finish(results, meta, batch, args.max_rto, args.max_rpo, quiet=True)
+    except KeyboardInterrupt:
+        log("interrupted: removing the workload and the lab, writing a partial report")
+        runner.remove_workload()
+        lab.down()
+        _finish(results, meta, batch, args.max_rto, args.max_rpo)
+        return 130
     if not args.keep_lab:
         lab.down()
     return _finish(results, meta, batch, args.max_rto, args.max_rpo)

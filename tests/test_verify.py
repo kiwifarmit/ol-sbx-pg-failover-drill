@@ -102,4 +102,34 @@ def test_no_outage_when_writes_continue():
     assert r["rto"]["max_gap_s"] < 0.02
     assert r["rto"]["downtime_s"] == 0
     assert r["rto"]["outages"] == 0
-    assert r["rto"]["first_commit_after_fault_s"] < 0.02
+    assert r["rto"]["writes_resumed_s"] == 0.0
+    assert 95 < r["client"]["commit_rate"] < 105  # one ack every 10 ms
+
+
+def test_acks_just_after_fault_then_silence_is_not_recovered():
+    # the fault time is taken a moment before the fault lands: a few acks after it
+    # must not hide an outage that never ends
+    pre, _ = stream(1, A, 0.0, 10.05)
+    events = pre + [{"ev": "stopping", "t": 40.0}, {"ev": "stop", "t": 41.0, "hung_writers": 0}]
+    r = analyze(events, keys(pre), fault_t=10.0)
+    assert not r["rto"]["recovered"]
+    assert 29.9 < r["rto"]["max_gap_s"] < 30.0
+    assert r["rto"]["writes_resumed_s"] is None
+
+
+def test_unread_ledger_reports_unknown_rpo():
+    pre, _ = stream(1, A, 0.0, 10.0)
+    r = analyze(pre, None, fault_t=5.0)
+    assert r["rpo"]["lost_acked"] is None
+    assert r["in_doubt"]["committed"] is None
+    assert r["unexplained_rows"] is None
+
+
+def test_inflight_at_stop_is_in_doubt():
+    pre, nxt = stream(1, A, 0.0, 5.0)
+    events = pre + [{"ev": "stopping", "t": 5.0}, {"ev": "inflight", "t": 15.0, "w": 1, "seq": nxt},
+                    {"ev": "stop", "t": 15.0, "hung_writers": 1}]
+    # the blocked COMMIT completed after all: its row is in the ledger, explained by "inflight"
+    r = analyze(events, keys(pre) + [(1, nxt)], fault_t=4.0)
+    assert r["in_doubt"] == {"total": 1, "committed": 1, "not_committed": 0}
+    assert r["unexplained_rows"] == 0

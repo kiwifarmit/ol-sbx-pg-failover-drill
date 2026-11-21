@@ -30,18 +30,21 @@ vendor slides.
   lost writes can be counted exactly instead of estimated.
 - Every fault type the team cares about is covered: primary crash, clean
   shutdown, planned switchover, network partition, loss of the arbiter (DCS),
-  failover with lagging standbys, loss of all standbys.
+  failover with stalled standbys, loss of all standbys. A partition cuts the
+  primary off from the cluster while clients can still reach it, so split brain
+  is actually tested.
 - Each run is repeated in the three replication modes, which correspond to
   Maximum Performance, Maximum Availability and Maximum Protection.
 - The output is JSON for pipelines and Markdown for people. The exit code fails
-  when RTO or RPO thresholds are breached, so the drill can gate a configuration
-  change in CI.
+  on a safety failure (split brain, writes that never resume, acknowledged writes
+  lost in synchronous mode) or when RTO/RPO thresholds are breached, so the drill
+  can gate a configuration change in CI. The project's own CI does exactly that.
 - Everything runs headless: an engineer, a CI job or an AI agent can drive it.
 
 ## How it is used
 
-1. **Design phase.** Run the full matrix against the proposed settings (timeouts,
-   sync mode, proxy health checks). Read the report and compare it with the
+1. **Design phase.** Run the full matrix with the proposed Patroni timers, sync
+   mode and failsafe setting. Read the report and compare it with the
    current Data Guard SLA. Adjust and rerun until the numbers fit, or change the
    SLA consciously.
 2. **Sign-off.** Attach the report to the architecture decision. It states, for
@@ -49,9 +52,9 @@ vendor slides.
    writes and blocks writes for N seconds, that losing all standbys in strict
    mode stops writes until one returns, and that the in-doubt commits the
    application must be ready to retry number M per failover.
-3. **Regression gate.** Keep the drill in CI. Any change to Patroni, HAProxy or
-   driver settings reruns it with thresholds, so a "small tuning change" cannot
-   silently double the failover time.
+3. **Regression gate.** Keep the drill in CI. Any change to the lab's Patroni
+   or HAProxy settings reruns it with thresholds, so a "small tuning change"
+   cannot silently double the failover time.
 4. **Training.** New PostgreSQL operators see real failovers, rewinds and
    split-brain checks on their own machine in minutes.
 
@@ -67,11 +70,13 @@ vendor slides.
   failure type in Data Guard terms.
 - **It is cheap and safe.** It uses synthetic data in disposable containers
   on one machine. It never touches the customer's systems.
-- **It is reusable.** The same drill can later run against a staging cluster
-  that reproduces the production settings.
+- **It can grow with the project.** Running the same drill against a staging
+  cluster that reproduces the production settings, rather than the built-in
+  lab, is the next step on the roadmap.
 
 ## Status
 
-Open source (Apache-2.0), published under the kiwifarmit GitHub organisation.
+Open source (Apache-2.0):
+[kiwifarmit/ol-sbx-pg-failover-drill](https://github.com/kiwifarmit/ol-sbx-pg-failover-drill).
 See [analysis.md](analysis.md) for the Oracle-to-PostgreSQL HA concept mapping
-and [sample-report.md](sample-report.md) for the results of a real run.
+and [sample-report.md](sample-report.md) for the results of real runs.

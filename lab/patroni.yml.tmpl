@@ -1,4 +1,5 @@
-# Rendered by pgdrill (string.Template). Lab only: trust auth inside the lab subnet.
+# Rendered by pgdrill (string.Template). Lab only: trust auth inside the lab subnets.
+# connect_address values are on the cluster network; clients use the node's client-network IP.
 scope: drill
 name: $name
 
@@ -44,8 +45,9 @@ postgresql:
     - local all all trust
     - host all all 127.0.0.1/32 trust
     - host replication replicator 127.0.0.1/32 trust
-    - host all all $subnet trust
-    - host replication replicator $subnet trust
+    - host all all $cluster_subnet trust
+    - host replication replicator $cluster_subnet trust
+    - host all all $client_subnet trust
   authentication:
     superuser:
       username: postgres

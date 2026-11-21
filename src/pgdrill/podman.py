@@ -21,7 +21,7 @@ def podman(*args: str, check: bool = True, timeout: float | None = 120, capture:
     if VERBOSE:
         print("+ " + shlex.join(cmd), file=sys.stderr)
     try:
-        proc = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         raise PodmanError(f"timeout after {timeout}s: {shlex.join(cmd)}") from exc
     if check and proc.returncode != 0:
