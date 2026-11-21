@@ -34,12 +34,7 @@ flowchart TB
         haproxy["HAProxy :5000<br/>checks Patroni /primary"]
     end
 
-    subgraph pg["Patroni + PostgreSQL 17, on both networks"]
-        direction LR
-        pg1["pg1"]
-        pg2["pg2"]
-        pg3["pg3"]
-    end
+    pg["pg1 · pg2 · pg3<br/>Patroni + PostgreSQL 17<br/>on both networks"]
 
     subgraph cluster["cluster network: replication + DCS"]
         etcd[("etcd")]
