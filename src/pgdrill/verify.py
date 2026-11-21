@@ -1,0 +1,140 @@
+"""Turn a workload event log + the surviving primary's ledger into RTO/RPO/split-brain numbers.
+
+Pure functions, no I/O: easy to unit-test with synthetic logs.
+All times in the result are seconds relative to the fault injection time (fault_t).
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from typing import Iterable
+
+# How long two servers' ack streams may overlap before we call it split brain.
+# Acks are timestamped after the response arrives in a client thread, so a few ms of
+# apparent overlap at a clean handover is measurement noise, not two primaries.
+OVERLAP_TOLERANCE_S = 0.05
+# Gaps between consecutive acks (all writers merged) above this count as unavailability.
+GAP_THRESHOLD_S = 0.5
+
+
+# SQLSTATE classes where the server definitely did not commit: invalid transaction state
+# (25006 = read-only, i.e. we reached a standby or a demoted primary), integrity, data,
+# syntax, resources, rollback. Anything else, and no SQLSTATE at all (connection lost),
+# is in doubt: 57P01 "terminating connection" can arrive after a local commit.
+REJECTED_SQLSTATE_CLASSES = {"22", "23", "25", "40", "42", "53"}
+
+
+def is_rejection(err: dict) -> bool:
+    st = err.get("sqlstate")
+    return bool(st) and st[:2] in REJECTED_SQLSTATE_CLASSES
+
+
+def _r(x: float | None, nd: int = 3) -> float | None:
+    return None if x is None else round(x, nd)
+
+
+def analyze(
+    events: Iterable[dict],
+    ledger_rows: Iterable[Iterable[int]],
+    fault_t: float,
+    ip_to_node: dict[str, str] | None = None,
+    gap_threshold: float = GAP_THRESHOLD_S,
+    overlap_tolerance: float = OVERLAP_TOLERANCE_S,
+) -> dict:
+    ip_to_node = ip_to_node or {}
+    node = lambda ip: ip_to_node.get(ip, ip)  # noqa: E731
+
+    events = list(events)
+    acks = [e for e in events if e["ev"] == "ack"]
+    commit_errs = [e for e in events if e["ev"] == "err" and e.get("phase") == "commit"]
+    connects = [e for e in events if e["ev"] == "connect"]
+    stop = next((e for e in events if e["ev"] == "stop"), None)
+    end_t = stop["t"] if stop else max((e["t"] for e in events), default=fault_t)
+
+    ledger = {(int(w), int(s)) for w, s in ledger_rows}
+    acked = {(e["w"], e["seq"]): e for e in acks}
+    rejected = {(e["w"], e["seq"]): e for e in commit_errs if is_rejection(e)}
+    in_doubt = {(e["w"], e["seq"]): e for e in commit_errs if not is_rejection(e)}
+
+    # ---- RPO: acknowledged writes missing from the surviving primary
+    lost = sorted((e for k, e in acked.items() if k not in ledger), key=lambda e: e["t"])
+    in_doubt_committed = sum(1 for k in in_doubt if k in ledger)
+    # rows nobody can account for; a "rejected" row that shows up anyway is also counted here
+    unexplained = len(ledger - acked.keys() - in_doubt.keys())
+
+    # ---- RTO: longest write gap that ends after the fault (all writers merged)
+    times = sorted(e["t"] for e in acks)
+    all_gaps = [(a, b) for a, b in zip(times, times[1:]) if b > fault_t]
+    after = [t for t in times if t > fault_t]
+    recovered = bool(after)
+    if not recovered:
+        all_gaps.append((times[-1] if times else fault_t, end_t))
+    gaps = [g for g in all_gaps if g[1] - g[0] > gap_threshold]
+    if not recovered and all_gaps[-1] not in gaps:
+        gaps.append(all_gaps[-1])  # an open-ended outage always counts
+    max_gap = max(all_gaps, key=lambda g: g[1] - g[0], default=None)
+    downtime = sum(b - a for a, b in gaps)
+
+    # ---- Split brain: did an earlier primary keep acking after a later one started?
+    per_srv: dict[str, list[float]] = defaultdict(list)
+    for e in acks:
+        per_srv[e.get("srv") or "?"].append(e["t"])
+    order = sorted(per_srv, key=lambda s: min(per_srv[s]))
+    servers = [
+        {"node": node(s), "acks": len(per_srv[s]), "first": _r(min(per_srv[s]) - fault_t),
+         "last": _r(max(per_srv[s]) - fault_t)}
+        for s in order
+    ]
+    overlap_acks = 0
+    overlap_lost = 0
+    lost_keys = {(e["w"], e["seq"]) for e in lost}
+    for i, s in enumerate(order):
+        later_starts = [min(per_srv[x]) for x in order[i + 1:]]
+        if not later_starts:
+            continue
+        cutoff = min(later_starts) + overlap_tolerance
+        for e in acks:
+            if (e.get("srv") or "?") == s and e["t"] > cutoff:
+                overlap_acks += 1
+                overlap_lost += (e["w"], e["seq"]) in lost_keys
+
+    return {
+        "acks": len(acks),
+        "ledger_rows": len(ledger),
+        "rpo": {
+            "lost_acked": len(lost),
+            "lost_first_s": _r(lost[0]["t"] - fault_t) if lost else None,
+            "lost_last_s": _r(lost[-1]["t"] - fault_t) if lost else None,
+            "lost_sample": [[e["w"], e["seq"]] for e in lost[:10]],
+        },
+        "in_doubt": {
+            "total": len(in_doubt),
+            "committed": in_doubt_committed,
+            "not_committed": len(in_doubt) - in_doubt_committed,
+        },
+        "unexplained_rows": unexplained,
+        "rto": {
+            "recovered": recovered,
+            "max_gap_s": _r(max_gap[1] - max_gap[0]) if max_gap else 0.0,
+            "max_gap_from_s": _r(max_gap[0] - fault_t) if max_gap else None,
+            "max_gap_to_s": _r(max_gap[1] - fault_t) if max_gap else None,
+            "downtime_s": _r(downtime),
+            "outages": len(gaps),
+            "first_commit_after_fault_s": _r(after[0] - fault_t) if after else None,
+        },
+        "split_brain": {
+            "detected": overlap_acks > 0,
+            "overlap_acks": overlap_acks,
+            "overlap_lost": overlap_lost,
+            "servers": servers,
+        },
+        "client": {
+            "connects": len(connects),
+            "connected_to_standby": sum(1 for e in connects if e.get("rec")),
+            "commit_errors": len(commit_errs),
+            "rejected": len(rejected),
+            "rejected_sqlstates": sorted({e["sqlstate"] for e in rejected.values()}),
+            "hung_writers_at_stop": stop.get("hung_writers", 0) if stop else None,
+            "duration_s": _r(end_t - (times[0] if times else end_t)),
+        },
+    }

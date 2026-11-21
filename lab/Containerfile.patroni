@@ -1,0 +1,17 @@
+# PostgreSQL 17 + Patroni (etcd3 DCS). Also used as the drill runner image:
+# the venv ships psycopg 3, and the pgdrill sources are bind-mounted at run time.
+FROM docker.io/library/postgres:17-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/patroni \
+ && /opt/patroni/bin/pip install --no-cache-dir "patroni[etcd3,psycopg3]==4.1.*" \
+ && mkdir -p /var/lib/postgresql/pgdata \
+ && chown -R postgres:postgres /var/lib/postgresql \
+ && chmod 0700 /var/lib/postgresql/pgdata
+
+ENV PATH=/opt/patroni/bin:$PATH
+USER postgres
+ENTRYPOINT ["/opt/patroni/bin/patroni"]
+CMD ["/etc/patroni.yml"]

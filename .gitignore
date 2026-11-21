@@ -1,0 +1,6 @@
+.pgdrill/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.pgdrill-test/

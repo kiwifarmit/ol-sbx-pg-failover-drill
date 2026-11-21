@@ -1,0 +1,49 @@
+name: drill
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "scenarios (comma list or all)"
+        default: "kill-primary,switchover,lagging-replicas-failover"
+      modes:
+        description: "modes (async,sync,strict or all)"
+        default: "async,sync"
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run pytest -q
+
+  drill:
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: podman info
+        run: podman version && podman info --format '{{.Host.NetworkBackend}} rootless={{.Host.Security.Rootless}}'
+      - name: build lab image
+        run: uv run pgdrill lab build
+      - name: run drill
+        # thresholds are informative here: async is expected to lose writes in some scenarios
+        run: |
+          uv run pgdrill run \
+            --scenarios "${{ inputs.scenarios || 'kill-primary,switchover,lagging-replicas-failover' }}" \
+            --modes "${{ inputs.modes || 'async,sync' }}" \
+            --out drill-report || echo "drill exit code $?"
+      - name: job summary
+        if: always()
+        run: test -f drill-report/report.md && cat drill-report/report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: drill-report
+          path: drill-report/

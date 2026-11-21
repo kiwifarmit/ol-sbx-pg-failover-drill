@@ -1,0 +1,64 @@
+# Rendered by pgdrill (string.Template). Lab only: trust auth inside the lab subnet.
+scope: drill
+name: $name
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: $ip:8008
+
+etcd3:
+  host: $etcd_ip:2379
+
+bootstrap:
+  dcs:
+    # Short timers so a drill finishes in about a minute.
+    # Constraint: loop_wait + 2 * retry_timeout <= ttl.
+    ttl: $ttl
+    loop_wait: $loop_wait
+    retry_timeout: $retry_timeout
+    maximum_lag_on_failover: 1048576
+    failsafe_mode: $failsafe
+    synchronous_mode: $sync
+    synchronous_mode_strict: $strict
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        wal_log_hints: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 256MB
+        max_connections: 100
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: $ip:5432
+  data_dir: /var/lib/postgresql/pgdata
+  bin_dir: /usr/lib/postgresql/17/bin
+  pg_hba:
+    - local all all trust
+    - host all all 127.0.0.1/32 trust
+    - host replication replicator 127.0.0.1/32 trust
+    - host all all $subnet trust
+    - host replication replicator $subnet trust
+  authentication:
+    superuser:
+      username: postgres
+      password: postgres
+    replication:
+      username: replicator
+      password: replicator
+    rewind:
+      username: rewinder
+      password: rewinder
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

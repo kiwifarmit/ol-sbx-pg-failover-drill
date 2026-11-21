@@ -1,0 +1,26 @@
+# Rendered by pgdrill (string.Template).
+# 5000 = read-write (Patroni /primary), 5001 = read-only (Patroni /replica).
+global
+    maxconn 400
+
+defaults
+    mode tcp
+    timeout connect 2s
+    timeout client 30m
+    timeout server 30m
+    timeout check 1s
+
+listen primary
+    bind *:5000
+    option httpchk OPTIONS /primary
+    http-check expect status 200
+    default-server inter 1s fall 2 rise 1 on-marked-down shutdown-sessions
+$primary_servers
+
+listen replicas
+    bind *:5001
+    balance roundrobin
+    option httpchk OPTIONS /replica
+    http-check expect status 200
+    default-server inter 1s fall 2 rise 1 on-marked-down shutdown-sessions
+$replica_servers
