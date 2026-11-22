@@ -1,10 +1,16 @@
 # Rendered by pgdrill (string.Template).
 # 5000 = read-write (Patroni /primary), 5001 = read-only (Patroni /replica).
+# Health-check transitions and sessions are logged to stdout (podman logs haproxy);
+# every run saves its slice of that log under <run>/logs/.
 global
     maxconn 400
+    log stdout format raw local0 info
 
 defaults
     mode tcp
+    log global
+    option tcplog
+    option dontlognull
     timeout connect 2s
     timeout client 30m
     timeout server 30m
@@ -14,6 +20,7 @@ listen primary
     bind *:5000
     option httpchk OPTIONS /primary
     http-check expect status 200
+    option log-health-checks
     default-server inter 1s fall 2 rise 1 on-marked-down shutdown-sessions
 $primary_servers
 

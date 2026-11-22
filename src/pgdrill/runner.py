@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .lab import CLIENT_IPS, CLIENT_NET, HAPROXY, IMAGE, LABEL, SRC_DIR
+from .lab import CLIENT_IPS, CLIENT_NET, HAPROXY, IMAGE, LABEL, SRC_DIR, net
 from .podman import exists, out, podman
 
 RUNNER = "pgdrill-runner"
@@ -49,7 +49,7 @@ def _base(outdir: Path) -> list[str]:
 
 
 def probe(outdir: Path, *args: str, timeout: float = 60) -> str:
-    return out("run", "--rm", "--network", f"{CLIENT_NET}:ip={PROBE_IP}", *_base(outdir),
+    return out("run", "--rm", "--network", net(CLIENT_NET, PROBE_IP), *_base(outdir),
                "-m", "pgdrill.probe", *args, timeout=timeout)
 
 
@@ -57,7 +57,7 @@ def start_workload(outdir: Path, dsn: str, run_id: str, writers: int, interval: 
     remove_workload()
     (outdir / "stop").unlink(missing_ok=True)
     podman(
-        "run", "-d", "--name", RUNNER, "--network", f"{CLIENT_NET}:ip={RUNNER_IP}", *_base(outdir),
+        "run", "-d", "--name", RUNNER, "--network", net(CLIENT_NET, RUNNER_IP), *_base(outdir),
         "-m", "pgdrill.workload", "--conninfo", dsn, "--run-id", run_id,
         "--writers", str(writers), "--interval", str(interval),
         "--out", "/out/events.jsonl", "--stop-file", "/out/stop",

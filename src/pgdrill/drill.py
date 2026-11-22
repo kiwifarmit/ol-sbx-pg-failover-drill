@@ -10,8 +10,8 @@ from pathlib import Path
 
 from . import runner
 from .faults import SCENARIOS, Ctx
-from .lab import IP_TO_NODE, Lab, Mode, Timers
-from .podman import PodmanError
+from .lab import ETCD, HAPROXY, IP_TO_NODE, NODES, Lab, Mode, Timers
+from .podman import PodmanError, podman
 from .verify import analyze
 
 
@@ -52,6 +52,19 @@ def last_ack_t(events_file: Path, tail_bytes: int = 65536) -> float | None:
     return None
 
 
+def save_logs(rundir: Path, since: float) -> None:
+    """Keep each lab container's log for the run window (HAProxy check transitions, Patroni)."""
+    logdir = rundir / "logs"
+    logdir.mkdir(exist_ok=True)
+    for name in (HAPROXY[0], *NODES, ETCD[0]):
+        try:
+            proc = podman("logs", "--timestamps", "--since", str(int(since)), name, check=False, timeout=30)
+        except PodmanError as exc:
+            (logdir / f"{name}.log").write_text(f"(could not read logs: {exc})\n")
+            continue
+        (logdir / f"{name}.log").write_text((proc.stdout or "") + (proc.stderr or ""))
+
+
 def wait_writes_resumed(events_file: Path, after_t: float, timeout: float) -> bool:
     """A healthy cluster is not the end of the outage: the proxy or the driver may still be
     routing clients nowhere. Wait until a write is acknowledged after `after_t` (lab clock)."""
@@ -83,6 +96,8 @@ def run_one(
     runner.probe(rundir, "init", "--conninfo", runner.node_conninfo(leader))
 
     log(f"run {run_id}: leader={leader}, starting {writers} writers via {via}")
+    # host clock, with a margin: on macOS the podman machine's clock can be slightly off
+    logs_since = time.time() - 5
     runner.start_workload(rundir, runner.conninfo(via), run_id, writers)
     ctx = Ctx(lab=lab, mode=mode, leader=leader, cluster=cluster)
     error = None
@@ -112,6 +127,7 @@ def run_one(
     finally:
         # Always stop the writers, also on Ctrl-C or an unexpected exception.
         runner.stop_workload()
+    save_logs(rundir, logs_since)
 
     leader_after = lab.leader()
     ledger_rows = None

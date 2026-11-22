@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LAB_DIR = REPO_ROOT / "lab"
 SRC_DIR = REPO_ROOT / "src"
 
-LAB_VERSION = 3  # bump when the topology changes so an old lab is never reused
+LAB_VERSION = 5  # bump when the topology changes so an old lab is never reused
 LABEL = "io.kiwifarm.pgdrill=1"
 
 CLUSTER_NET, CLUSTER_SUBNET = "pgdrill-cluster", "10.89.77.0/24"
@@ -41,6 +41,23 @@ NODES = {"pg1": "10.89.77.11", "pg2": "10.89.77.12", "pg3": "10.89.77.13"}  # cl
 CLIENT_IPS = {"pg1": "10.89.78.11", "pg2": "10.89.78.12", "pg3": "10.89.78.13"}  # client side
 HAPROXY = ("haproxy", "10.89.78.20")
 IP_TO_NODE = {ip: n for n, ip in NODES.items()} | {ip: n for n, ip in CLIENT_IPS.items()}
+
+
+def mac_for(ip: str) -> str:
+    """Fixed, locally administered MAC address for a lab IP (10.89.77.11 -> 02:00:0a:59:4d:0b).
+
+    Without it a restarted or reconnected container gets a new random MAC, and peers keep
+    sending to the old one from their ARP cache until the entry expires (15-45 s on Linux).
+    Some netavark versions announce the new address with a gratuitous ARP and some don't, so
+    the same drill measured a 2 s or a 15 s switchover depending on the host. A real server
+    keeps its MAC when Postgres restarts; the lab should too.
+    """
+    return "02:00:" + ":".join(f"{int(octet):02x}" for octet in ip.split("."))
+
+
+def net(name: str, ip: str) -> str:
+    """`podman run --network` value with a fixed IP and MAC."""
+    return f"{name}:ip={ip},mac={mac_for(ip)}"
 
 
 @dataclass(frozen=True)
@@ -137,7 +154,7 @@ class Lab:
         run = ["run", "-d", "--label", LABEL]
         name, ip = ETCD
         podman(
-            *run, "--name", name, "--hostname", name, "--network", f"{CLUSTER_NET}:ip={ip}", ETCD_IMAGE,
+            *run, "--name", name, "--hostname", name, "--network", net(CLUSTER_NET, ip), ETCD_IMAGE,
             "etcd", "--name", name, "--data-dir", "/etcd-data",
             "--listen-client-urls", "http://0.0.0.0:2379", "--advertise-client-urls", f"http://{ip}:2379",
             "--listen-peer-urls", "http://0.0.0.0:2380", "--initial-advertise-peer-urls", f"http://{ip}:2380",
@@ -147,12 +164,12 @@ class Lab:
         for name, ip in NODES.items():
             podman(
                 *run, "--name", name, "--hostname", name,
-                "--network", f"{CLUSTER_NET}:ip={ip}", "--network", f"{CLIENT_NET}:ip={CLIENT_IPS[name]}",
+                "--network", net(CLUSTER_NET, ip), "--network", net(CLIENT_NET, CLIENT_IPS[name]),
                 "-v", f"{self.cfgdir / (name + '.yml')}:/etc/patroni.yml:ro", IMAGE,
             )
         name, ip = HAPROXY
         podman(
-            *run, "--name", name, "--hostname", name, "--network", f"{CLIENT_NET}:ip={ip}",
+            *run, "--name", name, "--hostname", name, "--network", net(CLIENT_NET, ip),
             "-v", f"{self.cfgdir / 'haproxy.cfg'}:/usr/local/etc/haproxy/haproxy.cfg:ro", HAPROXY_IMAGE,
         )
         return self.wait_healthy(mode, timeout=timeout)

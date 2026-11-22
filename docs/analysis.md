@@ -48,7 +48,10 @@ late, usually during the first failover rehearsal.
 5. **RTO is mostly configuration.** Failover time is set by `ttl`, `loop_wait`,
    `retry_timeout`, the proxy health-check interval and the driver's TCP
    timeouts. The defaults add up to 30+ seconds. Nobody knows the real number
-   until they measure it under load.
+   until they measure it under load. With Patroni in containers on fixed IPs,
+   the network matters too. A node restarted with a new MAC address can stay
+   unreachable for up to ~45 s (the ARP cache lifetime) unless the network
+   announces it. Our first CI runs measured exactly that.
 6. **An isolated asynchronous primary keeps taking writes.** Cut off from the
    DCS and its standbys but still reachable by clients, the primary acknowledges
    commits until Patroni demotes it (about `retry_timeout` later). After

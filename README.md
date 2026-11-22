@@ -229,6 +229,15 @@ The host side is stdlib only and drives the `podman` CLI. psycopg only runs
 inside the lab image. Set `PGDRILL_PODMAN="sudo podman"` if rootless networking
 gets in the way on your host.
 
+Every lab container has a fixed MAC address derived from its IP. Without it, a
+restarted node comes back with a new MAC, and peers keep sending to the old one
+from their ARP cache. Older netavark releases (1.4, as on Ubuntu 24.04) don't
+announce the new address. There, HAProxy couldn't reach a restarted node for
+42 s, and a switchover to it looked like a 9–15 s outage.
+
+Each run also saves the HAProxy and Patroni logs for its window under
+`<run>/logs/`. HAProxy logs every health-check transition.
+
 ## Limitations
 
 - The lab is not a production setup: trust authentication inside the lab

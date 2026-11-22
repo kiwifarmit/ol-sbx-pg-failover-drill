@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import runner
-from .lab import CLUSTER_NET, ETCD, NODES, Lab, Mode
+from .lab import CLUSTER_NET, ETCD, NODES, Lab, Mode, mac_for
 from .podman import podman
 
 
@@ -105,7 +105,8 @@ def partition_primary(ctx: Ctx) -> float:
         _new_leader(ctx)
         time.sleep(5)
     finally:
-        podman("network", "connect", "--ip", NODES[ctx.leader], CLUSTER_NET, ctx.leader, check=False)
+        podman("network", "connect", "--ip", NODES[ctx.leader], "--mac-address", mac_for(NODES[ctx.leader]),
+               CLUSTER_NET, ctx.leader, check=False)
         ctx.mark("healed:" + ctx.leader)
     return t
 
@@ -185,7 +186,8 @@ def lagging_replicas_failover(ctx: Ctx) -> float:
         podman("kill", "-s", "KILL", ctx.leader)
     finally:
         for r in cut:
-            podman("network", "connect", "--ip", NODES[r], CLUSTER_NET, r, check=False)
+            podman("network", "connect", "--ip", NODES[r], "--mac-address", mac_for(NODES[r]), CLUSTER_NET, r,
+                   check=False)
         ctx.mark("standbys_reconnected")
     window = ctx.timer("ttl", 20) + 2 * ctx.timer("loop_wait", 5) + 15
     try:
