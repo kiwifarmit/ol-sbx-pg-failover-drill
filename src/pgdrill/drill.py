@@ -34,9 +34,40 @@ def _add_error(error: str | None, msg: str) -> str:
     return f"{error}; {msg}" if error else msg
 
 
+def last_ack_t(events_file: Path, tail_bytes: int = 65536) -> float | None:
+    """Timestamp of the last acknowledged commit in the (still growing) event log."""
+    try:
+        with open(events_file, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - tail_bytes))
+            lines = f.read().decode(errors="replace").splitlines()
+    except FileNotFoundError:
+        return None
+    for line in reversed(lines):
+        if '"ev":"ack"' in line:
+            try:
+                return float(json.loads(line)["t"])
+            except (ValueError, KeyError):
+                continue  # the first line of the tail can be cut in half
+    return None
+
+
+def wait_writes_resumed(events_file: Path, after_t: float, timeout: float) -> bool:
+    """A healthy cluster is not the end of the outage: the proxy or the driver may still be
+    routing clients nowhere. Wait until a write is acknowledged after `after_t` (lab clock)."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        t = last_ack_t(events_file)
+        if t is not None and t > after_t:
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def run_one(
     lab: Lab, scenario: str, mode: Mode, via: str, outdir: Path, timers: Timers | None = None,
     writers: int = 4, warmup: float = 5, steady: float = 5, recover_timeout: float = 180,
+    resume_timeout: float = 60,
 ) -> dict:
     timers = timers or Timers()
     sc = SCENARIOS[scenario]
@@ -69,11 +100,14 @@ def run_one(
         try:
             lab.wait_healthy(mode, timeout=recover_timeout)
             rejoined = True
-            ctx.mark("cluster_healthy")
+            healthy_t = ctx.mark("cluster_healthy")
         except TimeoutError as exc:
             error = _add_error(error, str(exc))
             log(f"not healthy: {exc}")
         recovery_s = round(time.monotonic() - t0, 1)
+        if rejoined and not wait_writes_resumed(rundir / "events.jsonl", healthy_t, resume_timeout):
+            error = _add_error(error, f"writes did not resume within {resume_timeout:.0f}s of a healthy cluster")
+            log(error)
         time.sleep(steady)
     finally:
         # Always stop the writers, also on Ctrl-C or an unexpected exception.

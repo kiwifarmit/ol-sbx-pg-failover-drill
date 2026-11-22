@@ -120,7 +120,9 @@ uv run pgdrill lab down
 A run **fails** on any of these, whatever thresholds you set:
 
 - the scenario itself errored
-- writes never resumed
+- writes never resumed. A healthy cluster doesn't end the measurement: the run
+  keeps going until clients can write again (up to 60 s), because the proxy or
+  the driver can lag behind Patroni
 - split brain
 - the cluster didn't heal
 - writers were still blocked at the end
