@@ -25,7 +25,7 @@ def _csv(value: str, choices: list[str]) -> list[str]:
 
 def _timers(args) -> Timers:
     timers = Timers(ttl=args.ttl, loop_wait=args.loop_wait, retry_timeout=args.retry_timeout,
-                    failsafe=not args.no_failsafe)
+                    failsafe=not args.no_failsafe, maximum_lag_on_failover=args.max_lag_on_failover)
     try:
         timers.validate()
     except ValueError as exc:
@@ -38,6 +38,8 @@ def _add_timer_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--loop-wait", type=int, default=5)
     p.add_argument("--retry-timeout", type=int, default=5)
     p.add_argument("--no-failsafe", action="store_true", help="disable Patroni failsafe_mode")
+    p.add_argument("--max-lag-on-failover", type=int, default=Timers.maximum_lag_on_failover, metavar="BYTES",
+                   help="Patroni maximum_lag_on_failover (default: 1048576)")
 
 
 def cmd_lab(args) -> int:

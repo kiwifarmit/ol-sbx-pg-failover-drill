@@ -44,7 +44,7 @@ flowchart TB
     report["report.json + report.md"]
 
     cli -- "start / stop writers" --> runner
-    cli -- "faults: kill, stop, pause,<br/>disconnect, switchover" --> pg
+    cli -- "faults: kill, stop,<br/>disconnect, switchover" --> pg
     cli -- "kill" --> etcd
     runner -- "via haproxy" --> haproxy --> pg
     runner -. "via libpq" .-> pg
@@ -59,7 +59,7 @@ flowchart TB
 2. N writer threads run *inside the lab's client network*. Each inserts
    `(run_id, writer_id, seq)` rows in autocommit and logs every acknowledged
    commit, every failed one and any still blocked at the end.
-3. The CLI injects the fault, drives recovery (restart, heal, unpause) and waits
+3. The CLI injects the fault, drives recovery (restart, reconnect) and waits
    until the cluster is back to 1 leader + 2 streaming replicas on the same
    timeline.
 4. It reads the ledger from the surviving primary and compares:
@@ -146,22 +146,28 @@ Exit codes:
 | `switchover` | `patronictl switchover` | Broker SWITCHOVER |
 | `partition-primary` | Cut the primary off from etcd and its peers (clients still reach it) | Primary isolated from observer and standbys |
 | `dcs-loss` | Kill etcd for ttl+loop_wait+5s | Observer loss |
-| `lagging-replicas-failover` | Freeze both standbys for 3s (they stop receiving WAL), then kill the primary | Failover with unshipped redo / `FastStartFailoverLagLimit` |
+| `lagging-replicas-failover` | Cut both standbys off from the cluster network for 2s (WAL stops reaching them), then kill the primary | Failover with unshipped redo / `FastStartFailoverLagLimit` |
 | `replicas-down` | Stop both replicas for ttl+5s | All standbys unreachable |
 
 `lagging-replicas-failover` has two legitimate outcomes, and the report's
 timeline says which one happened:
 
-- **Failover.** A standby is promoted, and in async whatever it never received
-  is lost.
-- **No failover.** Both standbys are more than `maximum_lag_on_failover`
-  (1 MB here) behind, so Patroni refuses to promote either one. The old primary
-  comes back with its data and the outage lasts until then.
+- **Failover** (the usual one). A standby is promoted, and in async whatever it
+  never received is lost.
+- **No failover.** Patroni sees both standbys more than
+  `--max-lag-on-failover` (1 MB by default) behind, so it refuses to promote
+  either one. The old primary comes back with its data and the outage lasts
+  until then.
 
-Which one you get depends on how much WAL the 3 seconds produced.
+The timeline records how far behind each standby really was when the primary
+died (`standby_lag_at_kill`).
 
-In `sync`/`strict`, freezing the standbys also stalls commits (the sync standby
-can't confirm), so the write gap starts before the crash.
+The cut uses the network, not `podman pause`. Pausing freezes the standby's
+processes, but the kernel keeps receiving WAL into its socket buffers, so the
+standby catches up on unpause and nothing is lost.
+
+In `sync`/`strict`, cutting off the standbys also stalls commits (the sync
+standby can't confirm), so the write gap starts before the crash.
 
 ## Modes
 
@@ -184,6 +190,12 @@ Patroni timers are short by default so a drill takes about a minute:
 `--ttl 20 --loop-wait 5 --retry-timeout 5`, with `failsafe_mode` on (`--no-failsafe`
 turns it off). Set them to the values you plan for production to measure that
 configuration instead. `loop_wait + 2 × retry_timeout` must not exceed `ttl`.
+
+`--max-lag-on-failover BYTES` sets Patroni's `maximum_lag_on_failover`, the
+counterpart of `FastStartFailoverLagLimit` (which is in seconds). Patroni
+compares a standby's position with the leader LSN last written to the DCS,
+and the leader writes it once per `loop_wait`. Up to `loop_wait` worth of WAL
+can therefore be missing from a standby without the limit seeing it.
 
 The writers use these client settings, and they shape every RTO number:
 
@@ -220,8 +232,8 @@ gets in the way on your host.
 - The lab is not a production setup: trust authentication inside the lab
   subnets, a single etcd node, no TLS.
 - Timings come from containers on one host. Network latency between real sites
-  adds to every number, and results vary from run to run (the async loss in
-  particular depends on timing and buffering).
+  adds to every number, and results vary from run to run (the size of an async
+  loss in particular depends on timing).
 - The workload is single-row autocommit inserts. Long transactions and
   application-level retry logic are out of scope for now.
 - It drives its own lab only. Pointing it at an existing staging cluster is on

@@ -40,7 +40,7 @@ def test_async_loss_counts_tail():
     post, _ = stream(1, B, 15.0, 20.0, seq0=nxt)
     events = pre + post
     # surviving primary is missing the last 2 seconds before the fault
-    ledger = [k for e, k in zip(pre, keys(pre)) if e["t"] < 8.0] + keys(post)
+    ledger = [k for e, k in zip(pre, keys(pre), strict=True) if e["t"] < 8.0] + keys(post)
     r = analyze(events, ledger, fault_t=10.0)
 
     assert r["rpo"]["lost_acked"] == sum(1 for e in pre if e["t"] >= 8.0)
@@ -79,7 +79,7 @@ def test_split_brain_overlap_detected():
     a, _ = stream(1, A, 0.0, 12.0)          # old primary keeps acking until 12s
     b, _ = stream(2, B, 9.0, 20.0)          # new primary starts at 9s
     events = a + b
-    ledger = [k for e, k in zip(a, keys(a)) if e["t"] < 9.0] + keys(b)
+    ledger = [k for e, k in zip(a, keys(a), strict=True) if e["t"] < 9.0] + keys(b)
     r = analyze(events, ledger, fault_t=8.0, ip_to_node=NODES)
     sb = r["split_brain"]
     assert sb["detected"]

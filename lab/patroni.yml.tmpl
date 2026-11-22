@@ -17,7 +17,8 @@ bootstrap:
     ttl: $ttl
     loop_wait: $loop_wait
     retry_timeout: $retry_timeout
-    maximum_lag_on_failover: 1048576
+    # Compared with the leader LSN last written to the DCS (about every loop_wait).
+    maximum_lag_on_failover: $maximum_lag_on_failover
     failsafe_mode: $failsafe
     synchronous_mode: $sync
     synchronous_mode_strict: $strict

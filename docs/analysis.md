@@ -54,6 +54,11 @@ late, usually during the first failover rehearsal.
    commits until Patroni demotes it (about `retry_timeout` later). After
    failover those writes are gone. In synchronous mode the same commits block
    instead, because no standby can confirm them.
+7. **The lag limit compares against a stale LSN.** Patroni checks a standby
+   against the leader LSN last written to the DCS, and the leader only writes
+   it once per `loop_wait`. Up to `loop_wait` worth of WAL can be missing from
+   a standby without `maximum_lag_on_failover` seeing it. A standby can be
+   promoted, and the writes it lacks lost, even with a tight limit.
 
 ## 3. The gap
 
@@ -91,9 +96,9 @@ It runs a repeatable, headless failover drill and turns it into numbers:
   on a safety failure (split brain, no recovery, acknowledged writes lost in
   synchronous mode) or when a run breaks the RTO/RPO thresholds you set
 
-The Patroni timers, the replication mode and `failsafe_mode` are flags, so a team
-can set them to the values it plans for production and get numbers before the
-cutover instead of after. Pointing the drill at an existing staging cluster,
+The Patroni timers, `maximum_lag_on_failover`, the replication mode and
+`failsafe_mode` are flags, so a team can set them to the values it plans for
+production and get numbers before the cutover instead of after. Pointing the drill at an existing staging cluster,
 instead of the built-in lab, is on the roadmap.
 
 ## References

@@ -64,6 +64,8 @@ class Timers:
     loop_wait: int = 5
     retry_timeout: int = 5
     failsafe: bool = True
+    # bytes; Patroni's equivalent of FastStartFailoverLagLimit (which is in seconds)
+    maximum_lag_on_failover: int = 1048576
 
     def validate(self) -> None:
         # Patroni's documented constraint; otherwise the leader key can expire mid-retry.
@@ -72,6 +74,8 @@ class Timers:
                 f"loop_wait + 2*retry_timeout must be <= ttl "
                 f"(got {self.loop_wait} + 2*{self.retry_timeout} > {self.ttl})"
             )
+        if self.maximum_lag_on_failover < 0:
+            raise ValueError("maximum_lag_on_failover must be >= 0")
 
 
 def _bool(v: bool) -> str:
@@ -103,6 +107,7 @@ class Lab:
                     cluster_subnet=CLUSTER_SUBNET, client_subnet=CLIENT_SUBNET,
                     ttl=timers.ttl, loop_wait=timers.loop_wait, retry_timeout=timers.retry_timeout,
                     failsafe=_bool(timers.failsafe), sync=_bool(mode.sync), strict=_bool(mode.strict),
+                    maximum_lag_on_failover=timers.maximum_lag_on_failover,
                 )
             )
         servers = "\n".join(f"    server {n} {ip}:5432 check port 8008" for n, ip in CLIENT_IPS.items())

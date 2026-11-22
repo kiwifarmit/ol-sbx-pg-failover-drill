@@ -64,7 +64,8 @@ def render_markdown(results: list[dict], meta: dict, max_rto: float | None, max_
     t = meta.get("timers", {})
     out.append(
         f"- Patroni timers: ttl={t.get('ttl')} loop_wait={t.get('loop_wait')} "
-        f"retry_timeout={t.get('retry_timeout')} failsafe_mode={t.get('failsafe')}"
+        f"retry_timeout={t.get('retry_timeout')} failsafe_mode={t.get('failsafe')} "
+        f"maximum_lag_on_failover={t.get('maximum_lag_on_failover', 1048576)}"
     )
     out.append(f"- workload: {meta.get('writers')} writers, autocommit single-row inserts, "
                f"{meta.get('writer_interval_s', '?')}s pause between commits per writer")

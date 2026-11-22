@@ -16,7 +16,9 @@ class PodmanError(RuntimeError):
     pass
 
 
-def podman(*args: str, check: bool = True, timeout: float | None = 120, capture: bool = True) -> subprocess.CompletedProcess:
+def podman(
+    *args: str, check: bool = True, timeout: float | None = 120, capture: bool = True
+) -> subprocess.CompletedProcess:
     cmd = [*PODMAN, *args]
     if VERBOSE:
         print("+ " + shlex.join(cmd), file=sys.stderr)
